@@ -121,15 +121,91 @@ regressions" requirement)
 
 ## 2. Frontend: Next.js + shadcn/ui + Tailwind + mapcn
 
-*(To be completed once the frontend phase lands.)*
+- **Next.js 16 (App Router), static export.** `frontend/next.config.ts` sets `output: 'export'`
+  and `images.unoptimized: true` -- there is no Node.js runtime at launch, only the .NET process
+  serving pre-built static files, so a server-rendering or ISR mode was never an option. The whole
+  app is a single page (`app/page.tsx` renders one `AppShell` client component) rather than a
+  multi-route Next.js app, matching the original's single-HTML-file structure and sidestepping
+  static-export routing/rewrite concerns entirely.
+- **Framework version note:** Next.js 16 ships an in-repo warning (`node_modules/next/dist/docs/`,
+  surfaced via an auto-generated `AGENTS.md`/`CLAUDE.md` in `frontend/`) that its APIs have moved
+  on significantly since most model training data. Those docs were consulted directly (static
+  export guide, config reference) rather than relying on prior knowledge, and the generated
+  `AGENTS.md`/`CLAUDE.md` files were kept as-is (accurate, low-risk, and genuinely useful to future
+  contributors/agents) rather than deleted.
+- **shadcn/ui on Base UI, not Radix.** The shadcn CLI's current default primitive library is Base
+  UI (`@base-ui/react`), not Radix as in most existing shadcn docs/examples; component APIs differ
+  in places (e.g. `Dialog`'s non-dismissible-modal pattern is `disablePointerDismissal` + omitting
+  `onOpenChange`, not Radix's `onInteractOutside`/`onEscapeKeyDown`). `components/ui/**` is
+  generated vendor code, installed via `npx shadcn@latest add ...` and never hand-edited (also
+  excluded from `eslint` for this reason -- its lint findings aren't ours to fix).
+- **mapcn**, installed via `npx shadcn@latest add @mapcn/map` (the mission's suggested literal
+  `https://mapcn.dev/maps/map.json` URL is stale; the current registry shorthand is
+  `@mapcn/map`, resolved through a `"@mapcn"` registry entry the CLI adds to `components.json`).
+  This single component file (`components/ui/map.tsx`) bundles everything needed -- `Map`,
+  `MapMarker` (draggable, drag events), `MapRoute` (GeoJSON line layer) -- so no separate
+  markers/routes/controls registry items were needed.
+- **Map viewport control is deliberately uncontrolled.** mapcn's `Map` supports a fully controlled
+  `viewport`/`onViewportChange` pair, but this app only ever needs one-shot "fly/jump to this
+  point" actions (initial home-country centering, search results) -- not continuous pan/zoom state
+  sync. Driving those imperatively through the exposed `MapRef` (`mapRef.current.jumpTo(...)`/
+  `.flyTo(...)`) avoided a real bug hit during verification: initializing `viewport` as `undefined`
+  until the async home-country lookup resolved caused the map to construct uncontrolled, and a
+  later controlled-mode sync effect could silently no-op if it raced the map's own internal
+  settle/move events. The imperative-ref approach sidesteps that class of issue entirely.
+- **Route-editing drag handles are placed via nearest-point snapping, not a second per-leg OSRM
+  call.** `lib/route-geometry.ts`'s `computeSegmentHandles` places one draggable "insert a
+  waypoint here" marker per leg (between two consecutive named waypoints), positioned at that
+  leg's straight-line midpoint then snapped to the closest point on the already-fetched
+  road-following polyline. This avoids doubling OSRM request volume against the ~1req/s-limited
+  public demo server for what is a purely cosmetic handle-placement decision -- verified visually
+  to sit convincingly on the drawn route.
+- **Testing:** Vitest covers the pure logic (`lib/route-waypoints.ts` waypoint ordering/insertion,
+  `lib/route-geometry.ts` nearest-point-snap and handle placement) -- run via `npm run test`.
+  `npm run typecheck` (strict TypeScript, no `any`) and `npm run lint` are both clean.
+- **Verified end-to-end**, not just built: the static export was served by a real `dotnet run`
+  instance and driven in an actual browser (device panel, map rendering/tile-provider toggle,
+  location search + Set/Stop buttons, and the full route-planning flow including dragging a
+  mid-route handle to insert a via-point and watching the road-following route recalculate through
+  it). This caught two real bugs before they could ship: the viewport-control issue above, and a
+  Nominatim result-ordering bug (below).
 
 ## 3. New feature: road-network route simulation
 
-*(To be completed once the route-simulation phase lands -- backend service design: `RouteMath`
-pure interpolation, `RouteSimulationSession` per-UDID state machine, `RouteSimulationService`
-orchestration reusing `ILocationSimulationService`. Frontend/routing decisions: OSRM + Nominatim
-called directly from the browser, no backend proxy; status delivered via ~1s polling rather than
-SSE/WebSocket.)*
+### Routing and geocoding (frontend)
+
+- **OSRM**, called directly from the browser against the public demo server
+  (`router.project-osrm.org`) -- CORS-enabled, no API key, and the same ecosystem as the existing
+  Nominatim geocoder. No backend proxy: simplest option, and the public instance's ~1 req/s cap is
+  adequate for a single interactive user planning one route at a time. `lib/osrm-client.ts`
+  documents the self-hosting escape hatch (swap the base URL, a build-time constant since a static
+  export has no server to read a runtime env var from).
+- The demo server hosts all three of OSRM's `car`/`foot`/`bike` profiles (not just driving, as
+  initially assumed) -- `resolveOsrmProfile()` maps the chosen simulated speed to the closest
+  matching profile (≤8 km/h → foot, ≤25 km/h → bike, else driving) so the drawn route follows
+  paths appropriate to the pace without a separate profile selector in the UI.
+- **Geocoding result ordering bug found and fixed:** Nominatim's default `/search` result order is
+  *not* reliably sorted by relevance. Searching "Switzerland" for the home-country map centering
+  returned "Switzerland County, Indiana" (`importance: 0.53`) ahead of the country "Suisse"
+  (`importance: 0.89`) during verification, centering the map on the American Midwest instead of
+  Switzerland. `lib/nominatim-client.ts`'s `geocode()` now explicitly re-sorts every result by
+  Nominatim's own `importance` score before returning -- this affects every geocoding call site
+  (home-country centering, the location search box, and route start/end address lookup), not just
+  the one that surfaced it.
+- Draggable via-point editing: `lib/route-waypoints.ts` (`insertViaPointAtSegment`) is the pure
+  ordering logic; `components/map/route-layer.tsx` renders the actual drag handles and calls back
+  into it. Dropping a handle recalculates the OSRM route through start → via-points (in insertion
+  order) → end.
+
+### Simulation (backend, reused by the frontend's polling)
+
+`RouteMath` pure interpolation, `RouteSimulationSession` per-UDID state machine, and
+`RouteSimulationService` orchestration reusing `ILocationSimulationService` (see section 1.5's
+contract table for the `/route/*` endpoints). Status delivery is ~1s polling
+(`lib/use-route-status-poll.ts`) rather than SSE/WebSocket, for consistency with the existing
+download-progress polling pattern and because it needs zero extra infrastructure with a
+statically-exported frontend. SSE/WebSocket push is a possible future improvement if polling
+latency ever becomes a real problem, not implemented now.
 
 ## 4. Testing strategy and hardware limitations
 
