@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using iFakeLocation.Endpoints;
@@ -41,6 +43,11 @@ builder.Services.AddHttpClient<IDeveloperImageService, DeveloperImageService>()
 
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<ProblemDetailsExceptionHandler>();
+
+// Serialize enums (e.g. RouteSimulationState) as camelCase strings ("running") rather than
+// the default numeric value, so the frontend contract stays self-describing.
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase)));
 
 var app = builder.Build();
 
