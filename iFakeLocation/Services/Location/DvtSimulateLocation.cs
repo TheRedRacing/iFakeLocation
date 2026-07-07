@@ -1,18 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using iFakeLocation.Services.Devices;
 
-namespace iFakeLocation.Services.Location
-{
-    internal class DvtSimulateLocation : LocationService
-    {
-        public DvtSimulateLocation(DeviceInformation device) : base(device) {
-        }
+namespace iFakeLocation.Services.Location;
 
-        public override void SetLocation(PointLatLng? target) {
-            
-        }
+/// <summary>
+/// Placeholder for a DVT-service-based location simulator for iOS 17+. Never actually invoked --
+/// LocationSimulationService throws UnsupportedIosLocationException before reaching this class,
+/// exactly as the original app's DeviceInformation.SetLocation did. Preserved as an explicit
+/// marker of the known limitation rather than removed, matching the original file's intent.
+/// </summary>
+internal sealed class DvtSimulateLocation(DeviceRecord device) : LocationService(device) {
+    public override void SetLocation(PointLatLng? target) {
     }
 }

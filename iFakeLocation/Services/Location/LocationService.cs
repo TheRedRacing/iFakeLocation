@@ -1,13 +1,9 @@
-﻿namespace iFakeLocation.Services.Location
-{
-    internal abstract class LocationService
-    {
-        protected readonly DeviceInformation _device;
+using iFakeLocation.Services.Devices;
 
-        protected LocationService(DeviceInformation device) {
-            _device = device;
-        }
+namespace iFakeLocation.Services.Location;
 
-        public abstract void SetLocation(PointLatLng? target);
-    }
+internal abstract class LocationService(DeviceRecord device) {
+    protected readonly DeviceRecord _device = device;
+
+    public abstract void SetLocation(PointLatLng? target);
 }

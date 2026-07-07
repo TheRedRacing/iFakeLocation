@@ -1,89 +1,83 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
+using iFakeLocation.Interop;
 
-namespace iFakeLocation.Services.Restore
-{
-    // Wrapper for Apple Tatsu Signing Server (TSS)
-    internal class TSSRequest {
-        private const string TSS_CONTROLLER_ACTION_URL = "http://gs.apple.com/TSS/controller?action=2";
-        private const string TSS_CLIENT_VERSION_STRING = "libauthinstall-973.0.1";
+namespace iFakeLocation.Services.Restore;
 
-        private Dictionary<string, object> _request = new() {
-            { "@HostPlatformInfo", "mac" },
-            { "@VersionInfo", TSS_CLIENT_VERSION_STRING },
-            { "@UUID", Guid.NewGuid().ToString("D").ToUpperInvariant() }
-        };
+/// <summary>Wrapper for Apple's Tatsu Signing Server (TSS), used to authorize personalized (iOS 17+) image mounts.</summary>
+internal sealed class TSSRequest {
+    private const string TssControllerActionUrl = "http://gs.apple.com/TSS/controller?action=2";
+    private const string TssClientVersionString = "libauthinstall-973.0.1";
 
-        public void Update(string key, object value) {
-            _request[key] = value;
+    private readonly Dictionary<string, object?> _request = new() {
+        {"@HostPlatformInfo", "mac"},
+        {"@VersionInfo", TssClientVersionString},
+        {"@UUID", Guid.NewGuid().ToString("D").ToUpperInvariant()},
+    };
+
+    public void Update(string key, object? value) {
+        _request[key] = value;
+    }
+
+    public void Update(Dictionary<string, object> dict) {
+        foreach (var kvp in dict) {
+            _request[kvp.Key] = kvp.Value;
         }
+    }
 
-        public void Update(Dictionary<string, object> dict) {
-            foreach (var kvp in dict) {
-                _request[kvp.Key] = kvp.Value;
-            }
-        }
-
-        public void ApplyRestoreRequestRules(Dictionary<string, object> tssEntry, Dictionary<string, object> parameters,
-            IEnumerable<Dictionary<string, object>> rules) {
-            foreach (var rule in rules) {
-                var conditionsFulfilled = true;
-                foreach (var kvp in (Dictionary<string, object>)rule["Conditions"]) {
-                    if (!conditionsFulfilled)
-                        break;
-                    object value2 = null;
-                    if (kvp.Key == "ApRawProductionMode")
-                        value2 = parameters.ContainsKey("ApProductionMode") ? parameters["ApProductionMode"] : null;
-                    else if (kvp.Key == "ApCurrentProductionMode")
-                        value2 = parameters.ContainsKey("ApProductionMode") ? parameters["ApProductionMode"] : null;
-                    else if (kvp.Key == "ApRawSecurityMode")
-                        value2 = parameters.ContainsKey("ApSecurityMode") ? parameters["ApSecurityMode"] : null;
-                    else if (kvp.Key == "ApRequiresImage4")
-                        value2 = parameters.ContainsKey("ApSupportsImg4") ? parameters["ApSupportsImg4"] : null;
-                    else if (kvp.Key == "ApDemotionPolicyOverride")
-                        value2 = parameters.ContainsKey("DemotionPolicy") ? parameters["DemotionPolicy"] : null;
-                    else if (kvp.Key == "ApInRomDFU")
-                        value2 = parameters.ContainsKey("ApInRomDFU") ? parameters["ApInRomDFU"] : null;
-
-                    conditionsFulfilled = value2 != null && value2.Equals(kvp.Value);
-                }
-
+    public void ApplyRestoreRequestRules(Dictionary<string, object?> tssEntry, Dictionary<string, object?> parameters,
+        IEnumerable<Dictionary<string, object?>> rules) {
+        foreach (var rule in rules) {
+            var conditionsFulfilled = true;
+            foreach (var kvp in (Dictionary<string, object?>)rule["Conditions"]!) {
                 if (!conditionsFulfilled)
-                    continue;
+                    break;
+                object? value2 = kvp.Key switch {
+                    "ApRawProductionMode" => parameters.GetValueOrDefault("ApProductionMode"),
+                    "ApCurrentProductionMode" => parameters.GetValueOrDefault("ApProductionMode"),
+                    "ApRawSecurityMode" => parameters.GetValueOrDefault("ApSecurityMode"),
+                    "ApRequiresImage4" => parameters.GetValueOrDefault("ApSupportsImg4"),
+                    "ApDemotionPolicyOverride" => parameters.GetValueOrDefault("DemotionPolicy"),
+                    "ApInRomDFU" => parameters.GetValueOrDefault("ApInRomDFU"),
+                    _ => null,
+                };
 
-                foreach (var kvp in (Dictionary<string, object>)rule["Actions"]) {
-                    if (!kvp.Value.GetType().IsValueType || kvp.Value.ToString() != "255") {
-                        tssEntry[kvp.Key] = kvp.Value;
-                    }
+                conditionsFulfilled = value2 != null && value2.Equals(kvp.Value);
+            }
+
+            if (!conditionsFulfilled)
+                continue;
+
+            foreach (var kvp in (Dictionary<string, object?>)rule["Actions"]!) {
+                if (kvp.Value is null || !kvp.Value.GetType().IsValueType || kvp.Value.ToString() != "255") {
+                    tssEntry[kvp.Key] = kvp.Value;
                 }
             }
         }
+    }
 
-        public Dictionary<string, object> SendAndReceive() {
-            var handler = new HttpClientHandler {
-                ClientCertificateOptions = ClientCertificateOption.Manual,
-                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-            };
-            var client = new HttpClient(handler);
-            client.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
-            client.DefaultRequestHeaders.Add("User-Agent", "InetURL/1.0");
-            client.DefaultRequestHeaders.Add("Expect", "");
+    public Dictionary<string, object?> SendAndReceive() {
+        var handler = new HttpClientHandler {
+            ClientCertificateOptions = ClientCertificateOption.Manual,
+            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator,
+        };
+        using var client = new HttpClient(handler);
+        client.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("InetURL/1.0");
+        client.DefaultRequestHeaders.Add("Expect", "");
 
-            var plist = PlistHelper.ToPlistXml(_request);
-            var response = client.PostAsync(TSS_CONTROLLER_ACTION_URL,
-                new StringContent(plist, Encoding.UTF8, "text/xml")).Result;
-            response.EnsureSuccessStatusCode();
+        var plist = PlistHelper.ToPlistXml(_request);
+        using var response = client.PostAsync(TssControllerActionUrl,
+            new StringContent(plist, Encoding.UTF8, "text/xml")).GetAwaiter().GetResult();
+        response.EnsureSuccessStatusCode();
 
-            var responseBody = response.Content.ReadAsStringAsync().Result;
-            var responseMessage = responseBody.Split(new[] { "MESSAGE=" }, 2, StringSplitOptions.None)[1].Split('&')[0];
-            if (responseMessage != "SUCCESS") {
-                throw new Exception("TSS request received unexpected response: " + responseMessage);
-            }
-
-            var plistBody = responseBody.Split(new[] { "REQUEST_STRING=" }, 2, StringSplitOptions.None)[1];
-            return PlistHelper.ReadPlistDictFromString(plistBody);
+        var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        var responseMessage = responseBody.Split(["MESSAGE="], 2, StringSplitOptions.None)[1].Split('&')[0];
+        if (responseMessage != "SUCCESS") {
+            throw new Exception("TSS request received unexpected response: " + responseMessage);
         }
+
+        var plistBody = responseBody.Split(["REQUEST_STRING="], 2, StringSplitOptions.None)[1];
+        return PlistHelper.ReadPlistDictFromString(plistBody);
     }
 }

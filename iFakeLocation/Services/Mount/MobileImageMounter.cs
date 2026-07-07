@@ -1,14 +1,9 @@
-﻿
-namespace iFakeLocation.Services.Mount
-{
-    internal abstract class MobileImageMounter
-    {
-        protected readonly DeviceInformation _device;
+using iFakeLocation.Services.Devices;
 
-        protected MobileImageMounter(DeviceInformation device) {
-            _device = device;
-        }
+namespace iFakeLocation.Services.Mount;
 
-        public abstract void EnableDeveloperMode(string[] resourcePaths);
-    }
+internal abstract class MobileImageMounter(DeviceRecord device) {
+    protected readonly DeviceRecord _device = device;
+
+    public abstract void EnableDeveloperMode(string[] resourcePaths);
 }
