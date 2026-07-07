@@ -6,3 +6,9 @@ iFakeLocation.Tests/obj/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+frontend/*.tsbuildinfo
+
+# wwwroot's contents are the frontend's build output (copied in by
+# frontend/scripts/copy-to-wwwroot.mjs), not source -- keep the directory itself via .gitkeep.
+iFakeLocation/wwwroot/*
+!iFakeLocation/wwwroot/.gitkeep
