@@ -13,13 +13,15 @@ changed and why.
 
 ## Requirements
 
-None of the published builds require a separately-installed .NET runtime -- they're
-self-contained on every platform.
+None of the published builds require a separately-installed .NET or Python runtime -- they're
+fully self-contained on every platform (the app bundles a frozen
+[pymobiledevice3](https://github.com/doronz88/pymobiledevice3) executable for device
+communication; see [ARCHITECTURE.md](ARCHITECTURE.md) for why and how).
 
 * **Windows / macOS:** iTunes (or Apple Mobile Device Support) installed, so the device shows up
   over USB.
-* **macOS / Linux:** see the [OpenSSL 1.1 known limitation](#known-limitations) below --
-  device-touching features currently need `libssl`/`libcrypto` 1.1 available on the system.
+* **Linux:** `usbmuxd` installed and running (most distros package this; it's what lets any tool,
+  including this one, see USB-connected iOS devices at all).
 
 ## Download
 
@@ -28,9 +30,10 @@ source (below).
 
 ## Building from source
 
-Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and
-[Node.js](https://nodejs.org/) (LTS or newer) on the machine doing the build -- **not** on the
-end user's machine, since the frontend is compiled to a static export ahead of time.
+Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0),
+[Node.js](https://nodejs.org/) (LTS or newer), and Python 3.9+ on the machine doing the build --
+**not** on the end user's machine, since both the frontend and the pymobiledevice3 helper are
+built ahead of time into static/frozen artifacts.
 
 ```shell
 # 1. Build the frontend (produces frontend/out/, then copies it into iFakeLocation/wwwroot/)
@@ -39,19 +42,33 @@ npm ci
 npm run build
 cd ..
 
-# 2. Publish the backend for your platform (bundles the just-built frontend automatically)
+# 2. Freeze the pymobiledevice3 helper for your platform (produces
+#    iFakeLocation/pmd3-dist/<rid>/pmd3[.exe], picked up by the matching publish profile below).
+#    IMPORTANT: PyInstaller cannot cross-compile -- run this ON a machine matching the target RID.
+cd pymobiledevice3-build
+./build.sh win-x64     # on Windows: .\build.ps1 win-x64
+./build.sh osx-x64      # on an Intel Mac, or an Apple Silicon Mac via `arch -x86_64`
+./build.sh linux-x64
+cd ..
+
+# 3. Publish the backend for your platform (bundles the frontend + pmd3 helper automatically)
 dotnet publish iFakeLocation/iFakeLocation.csproj -c Release -p:PublishProfile=Windows-x64
 dotnet publish iFakeLocation/iFakeLocation.csproj -c Release -p:PublishProfile=OSX-x64
 dotnet publish iFakeLocation/iFakeLocation.csproj -c Release -p:PublishProfile=Linux-x64
 ```
 
-Each profile publishes a self-contained build to `iFakeLocation/bin/publish/<platform>/`.
+Each profile publishes a self-contained build to `iFakeLocation/bin/publish/<platform>/`. Since
+step 2 can't cross-compile, producing all three platforms' builds realistically needs a CI matrix
+(one runner per OS), not a single contributor's machine -- see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-For local development, run the backend directly with `dotnet run --project iFakeLocation` (after
-building the frontend once) and it'll serve whatever's currently in `wwwroot/`; run
-`npm run dev` inside `frontend/` for a hot-reloading frontend dev server against a separately
-running backend (update `frontend/lib/api-client.ts`'s base URL, or use a proxy, if the two aren't
-on the same origin during development).
+For local development, you can skip step 2 and instead point the backend at a plain
+`pip install pymobiledevice3` virtualenv via configuration (environment variable
+`PyMobileDevice__ExecutablePathOverride=/path/to/venv/bin/pymobiledevice3`, or the equivalent key
+in `appsettings.Development.json`) -- run the backend directly with
+`dotnet run --project iFakeLocation` (after building the frontend once) and it'll serve whatever's
+currently in `wwwroot/`; run `npm run dev` inside `frontend/` for a hot-reloading frontend dev
+server against a separately running backend (update `frontend/lib/api-client.ts`'s base URL, or
+use a proxy, if the two aren't on the same origin during development).
 
 To run the backend's tests: `dotnet test iFakeLocation.Tests`. To run the frontend's:
 `cd frontend && npm run test` (and `npm run typecheck` / `npm run lint`).
@@ -62,8 +79,7 @@ To run the backend's tests: `dotnet test iFakeLocation.Tests`. To run the fronte
 Run `iFakeLocation.exe`.
 
 ### macOS
-Open the DMG (or the published folder) and run `iFakeLocation`. See the OpenSSL note below if
-device features fail to load.
+Open the DMG (or the published folder) and run `iFakeLocation`.
 
 ### Linux
 ```shell
@@ -80,60 +96,45 @@ chmod +x ./iFakeLocation
   Route" to draw the road-following path, optionally drag a point on the line to insert a
   waypoint (the route recalculates through it), pick a speed, then "Follow Route" to start the
   simulated walk/drive. Pause/Resume/Stop controls appear while a route is running.
-* If it's the first time setting a location on this device, the tool needs to download some files
-  to enable Developer Mode on your iDevice -- a progress dialog shows while that happens.
+* The first time you set a location on a device, the tool needs to download and mount a developer
+  disk image -- a "Preparing device..." dialog shows while that happens (no progress percentage;
+  see [ARCHITECTURE.md](ARCHITECTURE.md) for why).
 * Confirm the fake location using Apple Maps, Google Maps, etc. If your device is still stuck at
   the faked location after stopping, turn Location Services off and back on in Settings > Privacy.
 * Your device will show a Developer menu in Settings afterward; a restart clears it.
-
-### Manually installing developer images
-
-If the automatic download doesn't work, create a `DeveloperImages/<iOS version>/` folder next to
-the executable (e.g. `DeveloperImages/16.4/`) and place the matching `DeveloperDiskImage.dmg` +
-`DeveloperDiskImage.dmg.signature` (iOS < 17) or `Image.dmg` + `BuildManifest.plist` +
-`Image.dmg.trustcache` (iOS 17+) inside it. See
-[xcode-developer-disk-image-all-platforms](https://github.com/haikieu/xcode-developer-disk-image-all-platforms/tree/master/DiskImages/iPhoneOS.platform/DeviceSupport)
-for a source of these files.
+* **iOS 17+** works the same way as older versions from the UI's perspective -- the app handles
+  the newer tunnel-based connection Apple requires internally, without ever asking for admin/root
+  privileges on any platform.
 
 ## Known limitations
 
-* **OpenSSL 1.1 on macOS/Linux:** the native `libimobiledevice` binary this app depends on links
-  against OpenSSL 1.1, which Homebrew has removed (EOL). Until upstream ships a fixed build,
-  device-touching features (device list, set/stop location, route simulation) will fail to load on
-  a system without `libssl.1.1`/`libcrypto.1.1` (or the Linux equivalent) available -- obtain it
-  from a third-party tap/archive and place it where the dynamic linker can find it. This is a
-  pre-existing upstream issue, not specific to this rewrite -- see
-  [ARCHITECTURE.md](ARCHITECTURE.md) for details.
-* **iOS 17+ location simulation is unsupported**, same as the original app.
-* **Apple Silicon + `dotnet run`:** `iMobileDevice-net` only ships an `x64` native macOS build (no
-  `arm64`). A self-contained `osx-x64` publish works fine on M1/M2/M3 Macs (the whole process runs
-  under Rosetta 2 transparently), but running the backend directly via `dotnet run` on Apple
-  Silicon launches a native `arm64` process that cannot load that `x64` library at all -- same
-  reason the original app's README insisted on "the x64 version, even if you have an M1/M2 Mac."
-  Publish-and-run instead of `dotnet run` when testing device features on Apple Silicon.
-* Loop mode restarts the route from the beginning rather than reversing direction back to the
-  start.
+* The classic (iOS < 17) location-simulation path is implemented but has not been verified against
+  real pre-17 hardware while building this rewrite (see [ARCHITECTURE.md](ARCHITECTURE.md)) -- if
+  you hit an issue setting a location on an older device specifically, please report it.
+* Loop mode (route simulation) restarts the route from the beginning rather than reversing
+  direction back to the start.
 
 ## Help
 
 **My device doesn't show up on the list?**
 Ensure it's plugged in, you've trusted this computer on the device, and it's visible in iTunes/
-Finder.
+Finder. On Linux, make sure `usbmuxd` is installed and running.
 
 **It says it can't mount the image, or some other generic error?**
 Make sure your iDevice trusts this computer. A reboot of the device often resolves transient
 issues.
 
-**"Unable to load shared library 'imobiledevice' or one of its dependencies"**
-See [Known limitations](#known-limitations) above (OpenSSL 1.1). For local development via
-`dotnet run` (not a published self-contained build), native assets land under
-`bin/Debug/net10.0/runtimes/<rid>/native/` rather than next to the executable -- either publish
-instead of `dotnet run`, or point the dynamic linker at that folder (`DYLD_LIBRARY_PATH` on macOS,
-`LD_LIBRARY_PATH` on Linux).
+**Building from source: "pmd3 executable not found" or device features fail immediately**
+The pymobiledevice3 helper wasn't built (or wasn't built for the RID you're publishing) -- see
+step 2 of [Building from source](#building-from-source). For local `dotnet run` development, make
+sure `PyMobileDevice:ExecutablePathOverride` points at a working `pip install pymobiledevice3`
+virtualenv instead.
 
 ## Special Thanks
 
 * [idevicelocation by JonGabilondoAngulo](https://github.com/JonGabilondoAngulo/idevicelocation)
-* [Xcode-iOS-Developer-Disk-Image by xushuduo](https://github.com/xushuduo/Xcode-iOS-Developer-Disk-Image/)
+* [pymobiledevice3 by doronz88](https://github.com/doronz88/pymobiledevice3) for the actively
+  maintained, cross-platform device-communication layer this rewrite runs on (including iOS 17+
+  support the original app never had)
 * [mapcn](https://www.mapcn.dev/) and [shadcn/ui](https://ui.shadcn.com/) for the frontend components
 * [OSRM](https://project-osrm.org/) and [OpenStreetMap Nominatim](https://nominatim.org/) for routing/geocoding

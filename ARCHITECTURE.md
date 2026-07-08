@@ -169,25 +169,18 @@ preemptively.
   `win-x86` and native Apple Silicon (`osx-arm64`) are not produced, matching the original's platform
   coverage.
 - Dropped NuGet packages: `Newtonsoft.Json` (replaced by `System.Text.Json`, built into ASP.NET
-  Core), `SharpZipLib` (replaced by `System.IO.Compression.ZipFile`, which is sufficient since the
-  only requirement is reading a handful of known-named entries out of a zip), `MimeTypes` (replaced
-  by ASP.NET Core's built-in static file middleware), `System.Net.Http` (built into the framework).
-  Kept: `iMobileDevice-net` (native device access, see 1.4) and `plist-cil` (plist parsing).
-- **`linux-x64` publishing needed a workaround for a RID-graph break.** `iMobileDevice-net` only
-  ships native Linux binaries under the legacy, version-specific `ubuntu.16.04-x64` RID folder.
-  .NET 8+ dropped that RID from its built-in graph entirely -- not just deprioritized it: the SDK
-  now outright rejects `ubuntu.16.04-x64` as a `RuntimeIdentifier` (`NETSDK1083`), and a plain
-  `dotnet publish -r linux-x64` silently publishes *without* any native assets at all (only a
-  build-time warning, `NETSDK1206`, hints at this). `iFakeLocation.csproj` adds a small MSBuild
-  target (`CopyLegacyLinuxNativeAssets`, `AfterTargets="Publish"`, conditioned on the RID starting
-  with `linux`) that copies the `.so` files straight out of the resolved NuGet package cache path
-  (`$(PkgiMobileDevice-net)`, via `GeneratePathProperty="true"` on the `PackageReference`) into the
-  publish output. Verified end-to-end: a `linux-x64` self-contained publish correctly bundles
-  `libimobiledevice-1.0.so`/`libplist-2.0.so`/etc. after this fix, whereas without it the folder
-  contains none of them.
+  Core), `SharpZipLib` (replaced by `System.IO.Compression.ZipFile`), `MimeTypes` (replaced by
+  ASP.NET Core's built-in static file middleware), `System.Net.Http` (built into the framework),
+  and -- as of the pivot in section 0 -- `iMobileDevice-net` and `plist-cil` (native device access
+  is now a subprocess call to a bundled pymobiledevice3 executable; see 1.4). The backend has zero
+  P/Invoke and zero `AllowUnsafeBlocks` left.
 - **Publish profiles** (`Properties/PublishProfiles/`): `Windows-x64.pubxml`, `OSX-x64.pubxml`,
   `Linux-x64.pubxml` (renamed from `Ubuntu.pubxml`) -- all `net10.0`, all `SelfContained=true`.
-  `Windows-x86.pubxml` was removed (dropping 32-bit support along with `net48`).
+  `Windows-x86.pubxml` was removed (dropping 32-bit support along with `net48`). The earlier RID-
+  graph workaround needed for `iMobileDevice-net`'s Linux native assets (a legacy `ubuntu.16.04-x64`
+  RID folder that .NET 8+'s RID graph no longer resolves for a `linux-x64` publish) no longer
+  applies now that package is gone -- pymobiledevice3 is pure Python, frozen once per OS/arch by
+  PyInstaller (see 1.4), with no RID-graph involvement at all.
 
 ### 1.2 Static file serving
 
@@ -205,60 +198,70 @@ build time (see section 2).
   replaced by `POST /api/exit`, which calls `IHostApplicationLifetime.StopApplication()` for a
   graceful shutdown that still flushes the HTTP response, instead of hard-killing the process.
 
-### 1.4 Native device access (iMobileDevice-net)
+### 1.4 Native device access (pymobiledevice3 subprocess, superseding iMobileDevice-net)
 
-The original's P/Invoke layer talking to libimobiledevice/libplist (device enumeration, lockdown
-services, image mounting, TSS/IMG4 personalization for iOS 17+) is preserved almost verbatim --
-this protocol-level code was already correct and is orthogonal to the web-framework rewrite. It now
-lives under `Services/{Devices,Location,Mount,Restore}/` instead of a handful of top-level files.
+**This whole section describes the architecture *after* the pivot documented in section 0.** The
+original plan (and this rewrite's first pass) kept `iMobileDevice-net`'s P/Invoke layer, ported
+near-verbatim into `Services/{Devices,Location,Mount,Restore}/`. That layer hit a genuine dead end
+(OpenSSL 1.1, removed from Homebrew, no fixed package release coming -- see section 0) and was
+replaced entirely. `Services/Mount/`, `Services/Restore/`, `Services/DeveloperImages/`,
+`Interop/`, and `Infrastructure/NativeLibraryBootstrap.cs` are deleted outright, not archived; the
+P/Invoke-resolution bugs that section previously documented (unversioned-alias workarounds, RID-
+graph issues) are moot since there is no P/Invoke left at all.
 
-**Two real, pre-existing native-library-resolution problems were found and fixed while verifying
-the rewrite actually runs (not just compiles) — both existed in the original app too, just
-undocumented:**
+**Current architecture:**
 
-1. **Version-suffixed native library names aren't resolved on macOS/Linux.** iMobileDevice-net
-   ships its native binaries as `libimobiledevice-1.0.dylib`/`.so` and `libplist-2.0.dylib`/`.so`,
-   but the package's own internal native-library resolver (registered lazily, the first time any
-   of its P/Invoke classes is touched) only probes the *bare* `imobiledevice`/`plist` names on
-   these platforms, and never finds the versioned files. We can't register a competing resolver
-   for that assembly ourselves to fix this directly: .NET only allows one `DllImportResolver` per
-   assembly, and the package's own registration (which always runs, unconditionally) throws
-   `InvalidOperationException` if one is already set. The fix (`Infrastructure/NativeLibraryBootstrap.cs`):
-   at startup, before touching any P/Invoke, create an unversioned alias copy of each known native
-   library (`libimobiledevice.dylib` -> copy of `libimobiledevice-1.0.dylib`, etc.) directly in
-   `AppContext.BaseDirectory` -- confirmed empirically that this is the *only* directory the
-   bare-name probing actually searches; writing the alias next to the versioned source file inside
-   a nested `runtimes/<rid>/native/` folder (which is where that source often lives in a
-   framework-dependent, non-published build) has no effect, since that nesting is purely a NuGet
-   packaging convention with no runtime-search-path meaning. The source file itself is located by
-   scanning every OS-appropriate `runtimes/<prefix>*/native/` sibling folder rather than assuming
-   an exact RID match, because a framework-dependent build keeps every RID the package ships as a
-   sibling regardless of the host machine's actual RID -- e.g. on Apple Silicon, iMobileDevice-net
-   has no `osx-arm64` native build at all, only `osx-x64`, so an exact-match search finds nothing.
-   This all runs automatically and is a no-op on Windows (whose bundled assets are already
-   unversioned) and a no-op once the aliases exist.
-   **Separately, and not fixable in code:** even with the alias correctly found and loaded, a
-   framework-dependent `dotnet run` on Apple Silicon launches a genuine `arm64` process, which
-   cannot load the `x86_64`-only `libimobiledevice`/`libplist` binaries at all (confirmed: dyld
-   reports "incompatible architecture"). A self-contained `osx-x64` publish sidesteps this
-   entirely, since it bundles an x64 CoreCLR too and the whole process runs under Rosetta 2
-   transparently -- this is the same reason the original app's README insisted on "the x64 version,
-   even if you have an M1/M2 Mac." For local dev-mode iteration on Apple Silicon, either use an x64
-   .NET SDK under Rosetta, or just publish-and-run instead of `dotnet run` when testing
-   device-touching features.
-2. **The bundled macOS/Linux `libimobiledevice` binary itself depends on OpenSSL 1.1**, which
-   Homebrew has removed entirely (EOL) -- see "Known limitations" below. This is unrelated to (1)
-   and not fixable from our side at all; it's baked into the compiled native binary shipped inside
-   the `iMobileDevice-net` 1.3.17 NuGet package (the latest available version -- no newer release
-   fixes this). It is a documented, longstanding upstream issue
-   ([libimobiledevice-win32/imobiledevice-net#200](https://github.com/libimobiledevice-win32/imobiledevice-net/issues/200)).
+- `Services/PyMobileDevice/`: `IPyMobileDeviceRunner`/`PyMobileDeviceRunner` wraps `Process.Start`
+  against a bundled `pmd3`/`pmd3.exe` executable (a PyInstaller-frozen pymobiledevice3 CLI --
+  see below). Two call shapes: `RunAsync` for commands that exit on their own (device queries,
+  mounting, `clear`/stop), and `RunFireAndForgetAsync` for `simulate-location set`, which -- verified
+  live against a real device -- reaches success internally in ~1-2s but then **does not exit on its
+  own**; the runner detects success from a DVT response-line marker (or a clean exit, for the non-
+  DVT iOS<17 path) and kills the process itself once detected, rather than waiting for it to end.
+- `Services/DeveloperMode/{IDeveloperModeService,DeveloperModeService}`: developer-mode-toggle
+  query/reveal (`amfi developer-mode-status`/`reveal-developer-mode`) and mounting
+  (`mounter auto-mount`, with `--userspace` for iOS 17+ -- see section 0.4) -- one CLI call each,
+  replacing the original's few-hundred-line native mount-protocol/TSS implementation, since
+  pymobiledevice3 resolves, downloads, and mounts the correct image (classic or personalized)
+  internally.
+- `Services/Devices/DeviceService`: `usbmux list` returns clean JSON on stdout (verified: `-v`
+  verbose logging goes to stderr, never pollutes stdout) mapping directly to `DeviceRecord`.
+  `ProductNameCatalog` (ProductType -> marketing name) is unchanged -- pymobiledevice3 returns the
+  same raw `ProductType` string, not a friendly name.
+  **Also fixed in passing:** the original's `Devices` list was only ever populated by a prior
+  `/get_devices` call; `GetDeviceOrThrowAsync` always re-enumerates fresh instead of trusting a
+  cache that might never have been populated.
+- `Services/Location/LocationSimulationService`: dispatches to `developer simulate-location`
+  (iOS < 17) or `developer dvt simulate-location` (iOS >= 17, `--userspace`), both against the same
+  `PushLocationAsync`/`EnsureReadyAsync` interface `RouteSimulationService` already depended on --
+  **no changes needed above the interface boundary** (see 0.2).
 
-We evaluated switching to alternative packages: `Netimobiledevice` (a pure C# reimplementation with
-no native binaries at all, which would sidestep both problems above) is younger and its coverage of
-disk-image mounting, TSS/IMG4 personalization, and location simulation is unconfirmed -- given the
-existing `iMobileDevice-net` integration already has all of that protocol code working and ported,
-we kept it and documented the OpenSSL limitation instead of taking on a rewrite-the-device-layer
-risk.
+**Packaging (`pymobiledevice3-build/`):** `build.sh`/`build.ps1` freeze pymobiledevice3 (pinned
+version, `requirements.txt`) via PyInstaller into `iFakeLocation/pmd3-dist/<rid>/pmd3[.exe]`, which
+`iFakeLocation.csproj` copies into the publish output under `pmd3/` for the RID being built (a
+no-op before that build has run for a given RID). This needs real, non-default PyInstaller flags
+(`--copy-metadata pymobiledevice3 --copy-metadata ipsw-parser --copy-metadata readchar
+--hidden-import ipsw_parser --hidden-import pyimg4 --hidden-import apple_compress
+--hidden-import readchar --collect-submodules pymobiledevice3`) -- discovered by iterating against
+real failures (`PackageNotFoundError` for `readchar`'s self-version-check, missing hidden imports
+for `ipsw_parser`/`pyimg4`/`apple_compress`), not assembled from guesswork. **Verified end-to-end**:
+the frozen binary was built and run against a real, connected device (macOS arm64 in this
+environment; the RID label passed to the build script does not itself cross-compile -- see the
+scripts' own comments) for `usbmux list` and `amfi developer-mode-status`, both succeeding.
+PyInstaller cannot cross-compile, so `win-x64`/`linux-x64` builds must run on a matching OS/arch
+(a CI matrix, realistically) -- this is a real, budgeted engineering cost, not a solved problem;
+Windows specifically has an open upstream issue with the `pytun_pmd3`/`wintun` tunnel module
+([doronz88/pymobiledevice3#1047](https://github.com/doronz88/pymobiledevice3/issues/1047)) that
+should be re-checked when a Windows build is actually produced.
+
+**Licensing:** both this project and pymobiledevice3 are GPL-3.0 -- no compatibility question
+either way, whether invoked as an arm's-length subprocess (chosen here, and wouldn't require GPL
+compatibility with our code regardless) or vendored more tightly.
+
+We evaluated `Netimobiledevice` (a pure C# reimplementation, which would have avoided a Python
+runtime/subprocess dependency entirely) but its coverage of disk-image mounting, TSS/IMG4
+personalization, and location simulation was unconfirmed against pymobiledevice3's proven, actively
+maintained implementation of exactly those flows -- see section 0 for the full evaluation.
 
 ### 1.5 REST API contract (old -> new)
 
@@ -272,12 +275,22 @@ JSON blobs.
 | `GET /version` | `GET /api/version` | GET | `{ "version": "2.0.0" }` |
 | `GET /home_country` | `GET /api/home-country` | GET | `{ "displayName": "..." }` |
 | `GET /get_devices` | `GET /api/devices` | GET | `{ "devices": [{name, displayName, udid, isNetwork}] }` |
-| `POST /set_location` | `POST /api/devices/{udid}/location` | POST | body `{lat, lng}`; `204` on success |
+| `POST /set_location` | `POST /api/devices/{udid}/location` | POST | body `{lat, lng}`; `204` on success; gates on device readiness internally (see below) |
 | `POST /stop_location` | `DELETE /api/devices/{udid}/location` | DELETE | `204` on success |
-| `POST /has_dependencies` | `POST /api/devices/{udid}/dependencies/check` | POST | `{hasDependencies, iosVersion}` |
-| `POST /get_progress` (plain-text body) | `GET /api/downloads/{iosVersion}/progress` | GET | identifier moved into the URL, matching GET semantics |
 | `GET /exit` | `POST /api/exit` | POST | GET with a side effect -> POST (see 1.3) |
 | *(new)* | `POST /api/devices/{udid}/route/start` \| `/pause` \| `/resume` \| `/stop`, `GET /route/status` | — | see section 3 |
+
+**`POST /has_dependencies` and `POST /get_progress` (plain-text body) have no replacement --
+removed, not renamed.** Every location/route endpoint already calls
+`ILocationSimulationService.EnsureReadyAsync` (developer-mode-toggle check + image mount)
+internally before acting, exactly as before; the only thing that changed is *how* that readiness
+check is implemented (one `mounter auto-mount` subprocess call instead of our own GitHub-scraping
+download chain). Since pymobiledevice3 doesn't expose byte-level mount/download progress over a
+CLI invocation either way, there was nothing left for a separate check-then-poll endpoint pair to
+add -- the frontend just shows an indeterminate "Preparing device..." dialog for the duration of
+the single `location`/`route/start` call instead of polling a percentage. Simpler to maintain, and
+not a capability regression: the original's progress bar was cosmetic in the sense that it couldn't
+be interacted with or cancelled either.
 
 ### 1.6 Deliberate behavior changes (not regressions -- documented here per the "no silent
 regressions" requirement)
@@ -292,16 +305,13 @@ regressions" requirement)
   design choice (there's no reason stopping a simulated location should behave differently from
   starting one with respect to developer-mode gating). `ILocationSimulationService.EnsureReadyAsync`
   is now called identically by both the set and the stop/delete path.
-- **Duplicate concurrent downloads for the same iOS version no longer race.** The original always
-  called `state.Start()` on a freshly constructed `DownloadState` even when one already existed for
-  that version (only the dictionary *entry* was deduplicated, not the download itself), wastefully
-  starting a second concurrent download into the same destination files. `DownloadStateStore.GetOrStart`
-  is now properly idempotent.
-- **iOS 17+ location simulation remains unsupported.** The original's `DvtSimulateLocation` was
-  (and still is, ported as-is for documentation purposes) an empty stub; `DeviceInformation.SetLocation`
-  threw `NotImplementedException` for iOS >= 17 without ever reaching it. This rewrite preserves the
-  limitation exactly, just surfaced as a clean `501` via `UnsupportedIosLocationException` instead of
-  an unhandled exception.
+- **iOS 17+ location simulation is now supported** -- a genuine capability improvement, not just a
+  rewrite. The original (and this rewrite's first, `iMobileDevice-net`-based pass) left
+  `DvtSimulateLocation` as an empty stub and threw `NotImplementedException`/a typed 501 for
+  iOS >= 17 instead. The pymobiledevice3 pivot (section 0) lifts this limitation entirely, verified
+  live against a real iOS 26 device, with no admin/sudo privileges required (`--userspace`, section
+  0.4). The DT (iOS < 17) path could not be verified against real hardware in this environment (no
+  device available) -- see section 4's testing-limitations note.
 
 ## 2. Frontend: Next.js + shadcn/ui + Tailwind + mapcn
 
@@ -393,26 +403,37 @@ latency ever becomes a real problem, not implemented now.
 
 ## 4. Testing strategy and hardware limitations
 
-- Pure logic (`RouteMath`, `RouteSimulationSession.AdvanceTick`, `DownloadState`/`DownloadStateStore`,
-  `DeveloperImageService`'s version parsing and image-path search) has xUnit coverage in
-  `iFakeLocation.Tests/`.
-- **Cannot be tested without physical hardware, under any circumstances, in this environment:**
-  device enumeration actually finding a real iDevice, developer-mode toggling, disk-image/personalized-image
-  mounting, TSS ticket exchange with Apple's servers, and confirming a device's displayed location
-  actually changes. These all sit behind interfaces (`IDeviceService`, `ILocationSimulationService`,
-  `IDeveloperModeService`, `IDeveloperImageService`) so the *orchestration* logic around them is
-  testable against fakes, but the real implementations can only be reviewed for protocol
-  correctness, not executed end-to-end, without a connected device. This is a hard limitation of an
-  AI coding agent building this in a sandboxed environment -- final on-device verification is a
-  manual step for the user.
+- Pure logic (`RouteMath`, `RouteSimulationSession.AdvanceTick`, `lib/route-waypoints.ts`,
+  `lib/route-geometry.ts`) has unit test coverage (`iFakeLocation.Tests/`, frontend Vitest).
+- **Unusually for this kind of project, a real, connected iOS device was available in this
+  environment for parts of the pymobiledevice3 pivot (with the user's explicit permission for each
+  mutating action, always restored to the real GPS location afterward).** This let several things
+  actually be verified end-to-end rather than just reviewed for protocol correctness: device
+  listing, developer-mode-status query, `mounter auto-mount`, `simulate-location set`/`clear`
+  (both directly via the CLI and through the full HTTP API against a running, published build), and
+  a live route simulation with progressing status. This is *not* the normal state of affairs and
+  should not be assumed for future changes.
+- **Still cannot be verified without matching hardware/OS, even with a device available:** the
+  classic DT (iOS < 17) `simulate-location` path (the connected test device was iOS 26) -- the
+  runner's success-detection logic falls back to "clean process exit" for that path (see 1.4),
+  which is a reasonable inference from the protocol's design but unconfirmed; the `win-x64`/
+  `linux-x64` PyInstaller-frozen builds (this environment is macOS arm64 only, and PyInstaller
+  cannot cross-compile -- see 1.4); and the Windows tunnel module issue
+  ([doronz88/pymobiledevice3#1047](https://github.com/doronz88/pymobiledevice3/issues/1047)) that
+  may affect iOS 17+ support specifically on Windows. All of the pymobiledevice3-touching logic
+  sits behind `IDeviceService`/`IDeveloperModeService`/`ILocationSimulationService`, so the
+  *orchestration* logic is testable against fakes regardless -- but final verification of anything
+  requiring hardware or a specific OS this environment doesn't have remains a manual step for the
+  user.
 
 ## 5. Known limitations
 
-- **OpenSSL 1.1 dependency on macOS/Linux** (see 1.4) -- the bundled `libimobiledevice` native
-  binary requires `libssl.1.1.dylib`/`libcrypto.1.1.dylib` (macOS) or the distro equivalent (Linux)
-  to be present on the system. Homebrew has removed the `openssl@1.1` formula entirely. Until
-  upstream ships a build linked against a current OpenSSL, affected users need to either obtain
-  OpenSSL 1.1 from a third-party tap/binary and place it where the dynamic linker can find it, or
-  (Linux) install their distro's legacy `libssl1.1` package if still archived. This affects the
-  original app identically; it is not a regression introduced by this rewrite.
-- iOS 17+ location simulation is unsupported (see 1.6) -- unchanged from the original.
+- **iOS 17+ location simulation is now supported** (see 0.4, 1.4, 1.6) -- this is the one
+  limitation from the original app this rewrite actually lifts, not just documents.
+- The classic DT (iOS < 17) `simulate-location set` success-detection path is implemented but
+  unverified against real hardware in this environment (see section 4).
+- `win-x64`/`linux-x64` `pmd3` builds must be produced on a matching OS/architecture (realistically
+  a CI matrix) -- PyInstaller cannot cross-compile; only the macOS arm64 build path was actually
+  exercised here (see 1.4).
+- Loop mode (route simulation) restarts from the beginning rather than reversing direction back to
+  the start -- a documented simplification, not a bug.
