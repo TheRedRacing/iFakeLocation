@@ -5,6 +5,133 @@ raw `HttpListener` + jQuery/Bootstrap/Leaflet frontend) and this rewrite (.NET 1
 Minimal API backend + Next.js/shadcn/mapcn frontend), and why. It is written incrementally as the
 rewrite proceeds.
 
+## 0. Pivot: iMobileDevice-net (P/Invoke) -> pymobiledevice3 (subprocess)
+
+**Why.** The native `libimobiledevice` binary bundled by `iMobileDevice-net` (the last release,
+1.3.17, is unmaintained since ~January 2024) links against OpenSSL 1.1 on macOS/Linux, which
+Homebrew has removed entirely. There is no newer package release that fixes this, and every
+mitigation available to us (unversioned-alias resolver fix, RID-graph workaround for Linux
+publishing) got the app right up to that dead end and no further -- it's not something a
+downstream consumer of the package can patch around. Rather than accept a real dependency on a
+legacy OpenSSL build the user has to hunt down themselves, the P/Invoke layer is being replaced
+entirely with [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), a pure-Python,
+actively maintained (weekly-ish releases), cross-platform reimplementation of the same device
+protocols -- invoked as a subprocess rather than P/Invoked as a native library. As a side effect,
+it also lifts the original's iOS 17+ location-simulation limitation (see the open question below).
+
+### 0.1 What becomes obsolete
+
+Every file that touches the native P/Invoke layer is superseded -- none of this is ported, it is
+deleted outright:
+
+- `Interop/NativeMethods.cs`, `Interop/NativeLibraryResolver.cs`, `Interop/PlistHelper.cs` --
+  P/Invoke declarations, the DllImportResolver alias-file workaround, and plist marshaling. There
+  is no P/Invoke left once nothing calls into `iMobileDevice-net`/`plist-cil` directly.
+- `Infrastructure/NativeLibraryBootstrap.cs` -- the entire native-library-loading/alias-creation
+  dance (`NativeLibraries.Load()`, the OS-specific unversioned-alias workaround) has nothing left
+  to bootstrap.
+- `Services/Mount/{IDeveloperModeService's mount half, DeveloperDiskImageMounter,
+  PersonalizedImageMounter}.cs` -- pymobiledevice3's `mounter auto-mount` (CLI) /
+  `auto_mount_developer()`/`auto_mount_personalized()` (Python API) already handles both the
+  classic (pre-iOS 17) and personalized/TSS-signed (iOS 17+) mount flows internally, including
+  locating or downloading the correct image. We call one command; none of the mount-protocol code
+  is ours to maintain anymore.
+- `Services/Restore/TSSRequest.cs` -- the Apple Tatsu Signing Server exchange for personalized
+  images is handled inside pymobiledevice3's own `auto_mount_personalized()`. We never construct
+  or send a TSS request ourselves.
+- `Services/DeveloperImages/{IDeveloperImageService, DeveloperImageService, DownloadState,
+  DownloadStateStore, DownloadStateNotFoundException}.cs` and `Options/DeveloperImageOptions.cs`
+  -- the entire custom GitHub-scraping/fallback-URL-chain download system, its zip extraction, and
+  its byte-level progress tracking are superseded by pymobiledevice3's own image
+  resolution/download (from its own bundled/maintained image repository, not the GitHub repos the
+  original scraped). **Contract consequence:** we lose byte-level download-percentage reporting --
+  pymobiledevice3 doesn't expose that granularity over a CLI invocation. The
+  `/dependencies/check` + `/downloads/{version}/progress` polling pair is replaced by a single
+  "preparing device" state exposed while the `mounter auto-mount` subprocess is in flight (see 0.3).
+- `Services/Location/{DtSimulateLocation, DvtSimulateLocation, ILocationSimulationService's DT
+  implementation}.cs` -- superseded by `pymobiledevice3 developer simulate-location` (iOS < 17) and
+  `pymobiledevice3 developer dvt simulate-location` (iOS >= 17, previously unsupported).
+- `Services/Devices/DeviceService.cs`'s P/Invoke enumeration body -- superseded by
+  `pymobiledevice3 usbmux list` / the equivalent Python API. `DeviceRecord` and
+  `ProductNameCatalog` (the ProductType -> marketing-name table) are **kept**: pymobiledevice3
+  returns the same raw lockdown properties (`ProductType`, `ProductVersion`, etc.), not a
+  marketing name, so the lookup table is still needed.
+- NuGet packages `iMobileDevice-net` and `plist-cil` are dropped entirely.
+
+### 0.2 What is unaffected
+
+This is the payoff of having built the backend around interfaces
+(`IDeviceService`/`IDeveloperModeService`/`ILocationSimulationService`) rather than calling
+P/Invoke code directly from endpoints: **`Endpoints/*.cs`, the entire `Services/RouteSimulation/`
+feature (`RouteMath`, `RouteSimulationSession`, `RouteSimulationService`), `Contracts/*.cs`, and
+the whole frontend are untouched.** Only the concrete service *implementations* change; the
+interfaces, the REST contract, and everything that consumes them stay exactly as they are. The
+route-simulation loop still calls `ILocationSimulationService.PushLocationAsync` once per tick --
+it now shells out to `pymobiledevice3 developer [dvt] simulate-location set` under the hood instead
+of sending DT-protocol bytes directly, but nothing above that interface boundary needs to know.
+
+### 0.3 Integration mechanism: PyInstaller-frozen bundle, invoked as a subprocess
+
+Three options, evaluated against the already-committed self-contained/zero-prerequisite goal:
+
+| Option | Zero-prerequisite? | Verdict |
+|---|---|---|
+| Require system Python 3 + `pip install pymobiledevice3` | No -- reintroduces exactly the kind of external dependency this rewrite has been trying to eliminate | Rejected |
+| Invoke a system-installed `pymobiledevice3` CLI found on PATH | No, same problem, just deferred to "if it happens to be there" | Rejected |
+| **Freeze pymobiledevice3 (PyInstaller) into a standalone executable, bundled per-OS in our own publish output, invoked via `Process.Start`** | Yes -- ships inside our own self-contained package, no Python needed on the end-user machine | **Chosen** |
+
+Implementation shape: a new `Services/PyMobileDevice/` (name TBD) wraps `Process.Start` calls to a
+bundled `pmd3` executable (Windows: `pmd3.exe`, macOS/Linux: `pmd3`), one per publish RID, parsing
+stdout/exit codes/JSON where available. This executable is **not** produced by `dotnet
+publish`/`npm run build` -- it needs its own build step (`pip install pyinstaller pymobiledevice3`
++ a PyInstaller spec, run **on each target OS**, since PyInstaller cannot cross-compile). This adds
+a third build leg alongside the .NET and Next.js ones, and realistically means a CI matrix
+(GitHub Actions `windows-latest`/`macos-latest`/`ubuntu-latest`) rather than a single contributor's
+machine producing all three -- flagged here explicitly since it changes "building from source" from
+a two-step to a three-step (and partially CI-dependent) process; the README will be updated to
+match once this lands.
+
+**Known risk, not a solved problem:** freezing pymobiledevice3 with PyInstaller is documented as
+genuinely finicky upstream (multiple open issues:
+[#1038](https://github.com/doronz88/pymobiledevice3/issues/1038),
+[#865](https://github.com/doronz88/pymobiledevice3/issues/865),
+[#1047](https://github.com/doronz88/pymobiledevice3/issues/1047)) -- it needs explicit
+`--hidden-import`/`--copy-metadata` flags for `ipsw_parser`, `zeroconf`, `pyimg4`,
+`apple_compress`, `readchar`, and the Windows build specifically has an open issue with the
+`pytun_pmd3`/`wintun` tunnel module. Budgeted as real engineering effort during implementation, not
+assumed to be a one-line `pyinstaller main.py` away from working, especially for the Windows tunnel
+path (relevant to the iOS 17+ question below).
+
+**Licensing:** both this project and pymobiledevice3 are GPL-3.0 -- there is no license
+compatibility question either way, whether pymobiledevice3 is invoked as an arm's-length subprocess
+(the chosen approach, which wouldn't require GPL compatibility with our code regardless) or
+hypothetically vendored more tightly.
+
+### 0.4 Open question: iOS 17+ support requires elevated privileges
+
+This is the one place this pivot doesn't cleanly resolve itself and needs a product decision, not
+just an engineering one. iOS 17+ moved developer-service access to Apple's RemoteXPC/CoreDevice
+transport, which pymobiledevice3 reaches through a *tunnel* it establishes itself
+(`pymobiledevice3 remote tunneld`) -- and creating that tunnel requires a TUN/TAP virtual network
+interface, which requires **admin/sudo privileges on every OS**. Pre-17 devices need none of this
+(the classic `com.apple.dt.simulatelocation` lockdown service works entirely unprivileged, exactly
+like today). Options, none of which are free:
+
+1. Support iOS 17+ and prompt for elevation (native OS elevation dialog: UAC on Windows,
+   AppleScript "with administrator privileges" on macOS, polkit/pkexec on Linux) to launch the
+   tunneld subprocess once. Real engineering cost (three different elevation mechanisms) and a
+   real trust/security posture change for a GPS-spoofing tool asking for admin rights.
+2. Support iOS 17+ but require the user to manually start `sudo pymobiledevice3 remote tunneld` in
+   their own terminal before using that feature -- no elevation code to write or trust to ask for,
+   but a meaningfully worse first-run experience for iOS 17+ users specifically, and support-burden
+   documentation to get right.
+3. Keep iOS 17+ unsupported (status quo, matching the original app) and use this pivot purely to
+   fix the OpenSSL/packaging dead end for iOS < 17 devices. Simplest, but forfeits the
+   iOS 17+ win that was one of the two stated reasons for this pivot.
+
+*(Resolved in conversation with the user before implementation proceeded -- see below once
+decided.)*
+
 ## 1. Backend: .NET 10 Minimal API
 
 ### 1.1 Framework and packaging
