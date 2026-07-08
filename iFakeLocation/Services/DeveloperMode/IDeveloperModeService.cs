@@ -1,6 +1,6 @@
 using iFakeLocation.Services.Devices;
 
-namespace iFakeLocation.Services.Mount;
+namespace iFakeLocation.Services.DeveloperMode;
 
 public enum DeveloperModeToggleState {
     NotApplicable,
@@ -15,6 +15,10 @@ public interface IDeveloperModeService {
     /// <summary>Reveals the developer-mode toggle in Settings so the user can turn it on manually (iOS 16+ only).</summary>
     Task EnableToggleAsync(DeviceRecord device, CancellationToken cancellationToken = default);
 
-    /// <summary>Mounts the developer disk image (or personalized image, iOS 17+) using the given resource file paths.</summary>
-    Task MountAsync(DeviceRecord device, string[] resourcePaths, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Ensures the developer disk image (or personalized image, iOS 17+) is downloaded and
+    /// mounted, via pymobiledevice3's own `mounter auto-mount` -- which resolves/downloads/mounts
+    /// the correct image internally, including the personalized-image/TSS flow for iOS 17+.
+    /// </summary>
+    Task EnsureMountedAsync(DeviceRecord device, CancellationToken cancellationToken = default);
 }
