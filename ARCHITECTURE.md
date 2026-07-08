@@ -107,30 +107,55 @@ compatibility question either way, whether pymobiledevice3 is invoked as an arm'
 (the chosen approach, which wouldn't require GPL compatibility with our code regardless) or
 hypothetically vendored more tightly.
 
-### 0.4 Open question: iOS 17+ support requires elevated privileges
+### 0.4 iOS 17+ support: resolved via `--userspace`, no elevation needed
 
-This is the one place this pivot doesn't cleanly resolve itself and needs a product decision, not
-just an engineering one. iOS 17+ moved developer-service access to Apple's RemoteXPC/CoreDevice
-transport, which pymobiledevice3 reaches through a *tunnel* it establishes itself
-(`pymobiledevice3 remote tunneld`) -- and creating that tunnel requires a TUN/TAP virtual network
-interface, which requires **admin/sudo privileges on every OS**. Pre-17 devices need none of this
-(the classic `com.apple.dt.simulatelocation` lockdown service works entirely unprivileged, exactly
-like today). Options, none of which are free:
+Initial concern: iOS 17+ moved developer-service access to Apple's RemoteXPC/CoreDevice transport,
+which pymobiledevice3 normally reaches through a *tunnel*, and a standard kernel-level tunnel
+(`pymobiledevice3 remote tunneld` / `start-tunnel`) needs a TUN/TAP virtual network interface --
+admin/sudo on every OS. That would have meant either a real elevation-prompt implementation (UAC/
+AppleScript-admin/pkexec) with a genuine trust/security posture change for a GPS-spoofing tool, or
+punting the whole feature.
 
-1. Support iOS 17+ and prompt for elevation (native OS elevation dialog: UAC on Windows,
-   AppleScript "with administrator privileges" on macOS, polkit/pkexec on Linux) to launch the
-   tunneld subprocess once. Real engineering cost (three different elevation mechanisms) and a
-   real trust/security posture change for a GPS-spoofing tool asking for admin rights.
-2. Support iOS 17+ but require the user to manually start `sudo pymobiledevice3 remote tunneld` in
-   their own terminal before using that feature -- no elevation code to write or trust to ask for,
-   but a meaningfully worse first-run experience for iOS 17+ users specifically, and support-burden
-   documentation to get right.
-3. Keep iOS 17+ unsupported (status quo, matching the original app) and use this pivot purely to
-   fix the OpenSSL/packaging dead end for iOS < 17 devices. Simplest, but forfeits the
-   iOS 17+ win that was one of the two stated reasons for this pivot.
+**Superseded by a better option found during CLI inspection:** every command that needs an iOS 17+
+tunnel (`mounter auto-mount`, `developer dvt simulate-location {set,clear,play}`, etc.) accepts a
+`--userspace` flag that establishes the tunnel **in-process, via a pure-Python userspace network
+stack, requiring no root/admin privileges at all**. The tradeoff is throughput: host->device
+transfers (mounting the DDI, pushing files) run slower than a kernel tunnel, since send segments
+are kept small for reliability. This is irrelevant for our use: the DDI mount happens once per
+device per session (a one-time, acceptable slowdown), and `simulate-location set` sends a handful
+of bytes per call -- there is no meaningful per-tick cost during route simulation.
 
-*(Resolved in conversation with the user before implementation proceeded -- see below once
-decided.)*
+**Decided:** always pass `--userspace` for iOS 17+ operations. No `TunneldService`, no per-OS
+elevation code, no admin prompt shown to the user, ever. Pre-17 devices are unaffected either way
+(no tunnel involved at all).
+
+**Verified live against a real, connected iOS 26 device** (with the user's explicit permission,
+restoring the real location with `clear` immediately after each test):
+
+- `developer dvt simulate-location clear --userspace` reliably completes end-to-end (tunnel setup
+  + DVT connect + command + clean process exit) in **~2 seconds**.
+- `developer dvt simulate-location set --userspace` reaches success internally just as fast --
+  verbose logs show userspace RSD established, DVT capabilities exchanged, and the
+  `simulateLocationWithLatitude:longitude:` call answered `OK`, all within the same second -- but
+  the CLI process then **hangs indefinitely afterward instead of exiting** (confirmed reproducible,
+  not a one-off). Our subprocess wrapper must treat "saw evidence of success" (not "process exited")
+  as completion, then kill the process itself.
+- Killing that hung `set` process **does not revert the simulated location** -- it stays pinned
+  until an explicit `clear`/`stop` call, exactly matching the original app's DT-based semantics
+  (and exactly what the "if your device is still stuck, turn Location Services off and on" help
+  text already assumes). This is good: it means `PushLocationAsync` doesn't need to keep any
+  process alive between ticks.
+- A mid-command USB disconnect fails fast and cleanly (`"Device is not connected"`, no hang) rather
+  than needing a timeout to detect -- good, maps directly to our existing `DeviceNotFoundException`.
+
+**Design conclusion:** start with the simpler "spawn a fresh `set --userspace` subprocess per tick,
+detect success, kill it" approach rather than building a persistent Python helper process that
+reuses one tunnel across a whole route session. At ~2s per call, a 1s `PeriodicTimer` tick
+naturally self-throttles to the real ~2s completion cadence (each tick already `await`s the
+previous push before scheduling the next) -- a ~2s position-update cadence is still smooth enough
+for a walking/biking/driving simulation. A long-lived helper process reusing one tunnel is a
+plausible future optimization if this ever proves too coarse in practice, not something to build
+preemptively.
 
 ## 1. Backend: .NET 10 Minimal API
 
