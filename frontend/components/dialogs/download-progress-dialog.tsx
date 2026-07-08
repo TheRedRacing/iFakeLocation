@@ -2,23 +2,23 @@
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
-import type { DownloadProgressResponse } from "@/lib/types";
 
-interface DownloadProgressDialogProps {
-  progress: DownloadProgressResponse | null;
+interface PreparingDeviceDialogProps {
+  preparing: boolean;
 }
 
-/** Non-dismissible while a developer-image download is in progress -- matches the original app. */
-export function DownloadProgressDialog({ progress }: DownloadProgressDialogProps) {
-  const open = progress !== null && !progress.done;
-
+/**
+ * Shown while the backend is readying a device (developer-mode toggle check + image mount).
+ * Non-dismissible, matching the original app's download-progress modal -- but indeterminate
+ * rather than a percentage: pymobiledevice3's mount step resolves/downloads/mounts the image as
+ * one call with no byte-level progress to report (see ARCHITECTURE.md).
+ */
+export function DownloadProgressDialog({ preparing }: PreparingDeviceDialogProps) {
   return (
-    <Dialog open={open} disablePointerDismissal modal>
+    <Dialog open={preparing} disablePointerDismissal modal>
       <DialogContent showCloseButton={false}>
-        <p className="text-sm">
-          Downloading: {progress?.fileName ?? "…"} ({(progress?.progressPercent ?? 0).toFixed(2)}%)
-        </p>
-        <Progress value={progress?.progressPercent ?? 0} />
+        <p className="text-sm">Preparing device… this can take a little while the first time.</p>
+        <Progress value={null} />
       </DialogContent>
     </Dialog>
   );

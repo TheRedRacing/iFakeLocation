@@ -13,7 +13,4 @@ public sealed class DeveloperModeHiddenException()
     : DeviceOperationException("Please turn on Developer Mode first via Settings >> Privacy & Security on your device.");
 
 public sealed class DeveloperImagesMissingException()
-    : DeviceOperationException("The developer images for the specified device are missing.");
-
-public sealed class UnsupportedIosVersionException()
-    : DeviceOperationException("Your device's iOS version is not supported at this time.");
+    : DeviceOperationException("The developer images for the specified device could not be prepared. Check the device is unlocked and trusted, then try again.");

@@ -12,17 +12,6 @@ export interface DevicesResponse {
   devices: DeviceDto[];
 }
 
-export interface DependencyCheckResponse {
-  hasDependencies: boolean;
-  iosVersion: string;
-}
-
-export interface DownloadProgressResponse {
-  done: boolean;
-  fileName: string | null;
-  progressPercent: number | null;
-}
-
 export interface VersionResponse {
   version: string;
 }

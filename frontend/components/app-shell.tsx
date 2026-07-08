@@ -17,12 +17,11 @@ import { DownloadProgressDialog } from "@/components/dialogs/download-progress-d
 import { AboutDialog } from "@/components/dialogs/about-dialog";
 import { apiClient } from "@/lib/api-client";
 import { geocode } from "@/lib/nominatim-client";
-import { pollDownloadProgress } from "@/lib/poll-download-progress";
 import { insertViaPointAtSegment } from "@/lib/route-waypoints";
 import { buildWaypointSequence } from "@/lib/route-waypoints";
 import { resolveOsrmProfile, route as computeRoute } from "@/lib/osrm-client";
 import { useRouteStatusPoll } from "@/lib/use-route-status-poll";
-import type { DeviceDto, DownloadProgressResponse, RoutePointDto } from "@/lib/types";
+import type { DeviceDto, RoutePointDto } from "@/lib/types";
 import type { MapRef } from "@/components/ui/map";
 
 function errorMessage(error: unknown): string {
@@ -39,7 +38,7 @@ export function AppShell() {
   const mapRef = useRef<MapRef>(null);
 
   const [messageDialogText, setMessageDialogText] = useState<string | null>(null);
-  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressResponse | null>(null);
+  const [preparingDevice, setPreparingDevice] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
 
@@ -101,39 +100,35 @@ export function AppShell() {
     }
   };
 
-  const ensureDependencies = async (udid: string): Promise<void> => {
-    const check = await apiClient.checkDependencies(udid);
-    if (!check.hasDependencies) {
-      setDownloadProgress({ done: false, fileName: null, progressPercent: 0 });
-      try {
-        await pollDownloadProgress(check.iosVersion, setDownloadProgress);
-      } finally {
-        setDownloadProgress(null);
-      }
-    }
-  };
-
+  // The backend gates on device readiness (developer-mode toggle + image mount) internally
+  // before acting -- there is no separate "check dependencies" step to call first. We just show
+  // an indeterminate "Preparing device..." dialog while these potentially-slow calls are in
+  // flight (see ARCHITECTURE.md: pymobiledevice3's mount step has no granular progress to poll).
   const handleSetLocation = async (): Promise<boolean> => {
     if (!selectedUdid || !manualMarker) return false;
+    setPreparingDevice(true);
     try {
-      await ensureDependencies(selectedUdid);
       await apiClient.setLocation(selectedUdid, manualMarker);
       return true;
     } catch (error) {
       setMessageDialogText(errorMessage(error));
       return false;
+    } finally {
+      setPreparingDevice(false);
     }
   };
 
   const handleStopLocation = async (): Promise<boolean> => {
     if (!selectedUdid) return false;
+    setPreparingDevice(true);
     try {
-      await ensureDependencies(selectedUdid);
       await apiClient.stopLocation(selectedUdid);
       return true;
     } catch (error) {
       setMessageDialogText(errorMessage(error));
       return false;
+    } finally {
+      setPreparingDevice(false);
     }
   };
 
@@ -170,12 +165,14 @@ export function AppShell() {
 
   const handleStartSimulation = async () => {
     if (!selectedUdid || routePolyline.length < 2) return;
+    setPreparingDevice(true);
     try {
-      await ensureDependencies(selectedUdid);
       await apiClient.startRoute(selectedUdid, routePolyline, speedKmh, loop);
       setRouteSimulating(true);
     } catch (error) {
       setMessageDialogText(errorMessage(error));
+    } finally {
+      setPreparingDevice(false);
     }
   };
 
@@ -291,7 +288,7 @@ export function AppShell() {
       </main>
 
       <MessageDialog message={messageDialogText} onClose={() => setMessageDialogText(null)} />
-      <DownloadProgressDialog progress={downloadProgress} />
+      <DownloadProgressDialog preparing={preparingDevice} />
       <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} version={version} />
     </div>
   );

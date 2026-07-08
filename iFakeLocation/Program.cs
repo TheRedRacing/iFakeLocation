@@ -5,19 +5,11 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using iFakeLocation.Endpoints;
 using iFakeLocation.Infrastructure;
 using iFakeLocation.Options;
-using iFakeLocation.Services.DeveloperImages;
+using iFakeLocation.Services.DeveloperMode;
 using iFakeLocation.Services.Devices;
 using iFakeLocation.Services.Location;
-using iFakeLocation.Services.Mount;
+using iFakeLocation.Services.PyMobileDevice;
 using iFakeLocation.Services.RouteSimulation;
-
-// Native libimobiledevice/libplist binaries must load before any device/plist P/Invoke is made.
-if (!NativeLibraryBootstrap.TryLoad(out var loadError)) {
-    Console.WriteLine("Failed to load necessary files to run iFakeLocation.");
-    if (loadError != null)
-        Console.WriteLine(loadError);
-    return;
-}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,19 +19,14 @@ builder.WebHost.ConfigureKestrel(options => {
     options.Listen(System.Net.IPAddress.Loopback, 0);
 });
 
-builder.Services.Configure<DeveloperImageOptions>(builder.Configuration.GetSection(DeveloperImageOptions.SectionName));
+builder.Services.Configure<PyMobileDeviceOptions>(builder.Configuration.GetSection(PyMobileDeviceOptions.SectionName));
 builder.Services.Configure<ServerOptions>(builder.Configuration.GetSection(ServerOptions.SectionName));
 
+builder.Services.AddSingleton<IPyMobileDeviceRunner, PyMobileDeviceRunner>();
 builder.Services.AddSingleton<IDeviceService, DeviceService>();
 builder.Services.AddSingleton<IDeveloperModeService, DeveloperModeService>();
 builder.Services.AddSingleton<ILocationSimulationService, LocationSimulationService>();
-builder.Services.AddSingleton<DownloadStateStore>();
 builder.Services.AddSingleton<IRouteSimulationService, RouteSimulationService>();
-
-builder.Services.AddHttpClient<IDeveloperImageService, DeveloperImageService>()
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler {
-        AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
-    });
 
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<ProblemDetailsExceptionHandler>();
@@ -58,7 +45,6 @@ app.UseStaticFiles();
 app.MapSystemEndpoints();
 app.MapDeviceEndpoints();
 app.MapLocationEndpoints();
-app.MapDependencyEndpoints();
 app.MapRouteEndpoints();
 
 await app.StartAsync();

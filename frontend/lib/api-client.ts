@@ -1,7 +1,5 @@
 import type {
-  DependencyCheckResponse,
   DevicesResponse,
-  DownloadProgressResponse,
   HomeCountryResponse,
   ProblemDetails,
   RoutePointDto,
@@ -59,15 +57,16 @@ export const apiClient = {
 
   getDevices: () => request<DevicesResponse>("/devices"),
 
+  // Both of these gate on device readiness (developer-mode toggle + image mount) internally on
+  // the backend before acting -- there is no separate "check dependencies" step or granular
+  // download-progress polling. pymobiledevice3's mount step resolves/downloads/mounts the correct
+  // image as one call with no byte-level progress to report; the frontend just shows an
+  // indeterminate "Preparing device..." state while these calls are in flight (see
+  // components/dialogs/download-progress-dialog.tsx).
   setLocation: (udid: string, point: RoutePointDto) =>
     request<void>(`/devices/${encodeURIComponent(udid)}/location`, jsonBody(point)),
   stopLocation: (udid: string) =>
     request<void>(`/devices/${encodeURIComponent(udid)}/location`, { method: "DELETE" }),
-
-  checkDependencies: (udid: string) =>
-    request<DependencyCheckResponse>(`/devices/${encodeURIComponent(udid)}/dependencies/check`, { method: "POST" }),
-  getDownloadProgress: (iosVersion: string) =>
-    request<DownloadProgressResponse>(`/downloads/${encodeURIComponent(iosVersion)}/progress`),
 
   startRoute: (udid: string, points: RoutePointDto[], speedKmh: number, loop: boolean) =>
     request<RouteStatusResponse>(`/devices/${encodeURIComponent(udid)}/route/start`, jsonBody({ points, speedKmh, loop })),
