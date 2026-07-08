@@ -21,6 +21,21 @@ rewrite proceeds.
   only requirement is reading a handful of known-named entries out of a zip), `MimeTypes` (replaced
   by ASP.NET Core's built-in static file middleware), `System.Net.Http` (built into the framework).
   Kept: `iMobileDevice-net` (native device access, see 1.4) and `plist-cil` (plist parsing).
+- **`linux-x64` publishing needed a workaround for a RID-graph break.** `iMobileDevice-net` only
+  ships native Linux binaries under the legacy, version-specific `ubuntu.16.04-x64` RID folder.
+  .NET 8+ dropped that RID from its built-in graph entirely -- not just deprioritized it: the SDK
+  now outright rejects `ubuntu.16.04-x64` as a `RuntimeIdentifier` (`NETSDK1083`), and a plain
+  `dotnet publish -r linux-x64` silently publishes *without* any native assets at all (only a
+  build-time warning, `NETSDK1206`, hints at this). `iFakeLocation.csproj` adds a small MSBuild
+  target (`CopyLegacyLinuxNativeAssets`, `AfterTargets="Publish"`, conditioned on the RID starting
+  with `linux`) that copies the `.so` files straight out of the resolved NuGet package cache path
+  (`$(PkgiMobileDevice-net)`, via `GeneratePathProperty="true"` on the `PackageReference`) into the
+  publish output. Verified end-to-end: a `linux-x64` self-contained publish correctly bundles
+  `libimobiledevice-1.0.so`/`libplist-2.0.so`/etc. after this fix, whereas without it the folder
+  contains none of them.
+- **Publish profiles** (`Properties/PublishProfiles/`): `Windows-x64.pubxml`, `OSX-x64.pubxml`,
+  `Linux-x64.pubxml` (renamed from `Ubuntu.pubxml`) -- all `net10.0`, all `SelfContained=true`.
+  `Windows-x86.pubxml` was removed (dropping 32-bit support along with `net48`).
 
 ### 1.2 Static file serving
 
