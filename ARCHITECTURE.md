@@ -73,10 +73,27 @@ undocumented:**
    assembly, and the package's own registration (which always runs, unconditionally) throws
    `InvalidOperationException` if one is already set. The fix (`Infrastructure/NativeLibraryBootstrap.cs`):
    at startup, before touching any P/Invoke, create an unversioned alias copy of each known native
-   library (`libimobiledevice.dylib` -> copy of `libimobiledevice-1.0.dylib`, etc.) next to the
-   versioned original, so the package's own (otherwise-correct) bare-name probing succeeds. This
-   runs automatically and is a no-op on Windows (whose bundled assets are already unversioned) and
-   a no-op if the aliases already exist.
+   library (`libimobiledevice.dylib` -> copy of `libimobiledevice-1.0.dylib`, etc.) directly in
+   `AppContext.BaseDirectory` -- confirmed empirically that this is the *only* directory the
+   bare-name probing actually searches; writing the alias next to the versioned source file inside
+   a nested `runtimes/<rid>/native/` folder (which is where that source often lives in a
+   framework-dependent, non-published build) has no effect, since that nesting is purely a NuGet
+   packaging convention with no runtime-search-path meaning. The source file itself is located by
+   scanning every OS-appropriate `runtimes/<prefix>*/native/` sibling folder rather than assuming
+   an exact RID match, because a framework-dependent build keeps every RID the package ships as a
+   sibling regardless of the host machine's actual RID -- e.g. on Apple Silicon, iMobileDevice-net
+   has no `osx-arm64` native build at all, only `osx-x64`, so an exact-match search finds nothing.
+   This all runs automatically and is a no-op on Windows (whose bundled assets are already
+   unversioned) and a no-op once the aliases exist.
+   **Separately, and not fixable in code:** even with the alias correctly found and loaded, a
+   framework-dependent `dotnet run` on Apple Silicon launches a genuine `arm64` process, which
+   cannot load the `x86_64`-only `libimobiledevice`/`libplist` binaries at all (confirmed: dyld
+   reports "incompatible architecture"). A self-contained `osx-x64` publish sidesteps this
+   entirely, since it bundles an x64 CoreCLR too and the whole process runs under Rosetta 2
+   transparently -- this is the same reason the original app's README insisted on "the x64 version,
+   even if you have an M1/M2 Mac." For local dev-mode iteration on Apple Silicon, either use an x64
+   .NET SDK under Rosetta, or just publish-and-run instead of `dotnet run` when testing
+   device-touching features.
 2. **The bundled macOS/Linux `libimobiledevice` binary itself depends on OpenSSL 1.1**, which
    Homebrew has removed entirely (EOL) -- see "Known limitations" below. This is unrelated to (1)
    and not fixable from our side at all; it's baked into the compiled native binary shipped inside

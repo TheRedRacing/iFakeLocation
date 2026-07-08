@@ -105,6 +105,12 @@ for a source of these files.
   pre-existing upstream issue, not specific to this rewrite -- see
   [ARCHITECTURE.md](ARCHITECTURE.md) for details.
 * **iOS 17+ location simulation is unsupported**, same as the original app.
+* **Apple Silicon + `dotnet run`:** `iMobileDevice-net` only ships an `x64` native macOS build (no
+  `arm64`). A self-contained `osx-x64` publish works fine on M1/M2/M3 Macs (the whole process runs
+  under Rosetta 2 transparently), but running the backend directly via `dotnet run` on Apple
+  Silicon launches a native `arm64` process that cannot load that `x64` library at all -- same
+  reason the original app's README insisted on "the x64 version, even if you have an M1/M2 Mac."
+  Publish-and-run instead of `dotnet run` when testing device features on Apple Silicon.
 * Loop mode restarts the route from the beginning rather than reversing direction back to the
   start.
 
