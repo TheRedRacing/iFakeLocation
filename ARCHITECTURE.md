@@ -138,24 +138,85 @@ restoring the real location with `clear` immediately after each test):
   verbose logs show userspace RSD established, DVT capabilities exchanged, and the
   `simulateLocationWithLatitude:longitude:` call answered `OK`, all within the same second -- but
   the CLI process then **hangs indefinitely afterward instead of exiting** (confirmed reproducible,
-  not a one-off). Our subprocess wrapper must treat "saw evidence of success" (not "process exited")
-  as completion, then kill the process itself.
-- Killing that hung `set` process **does not revert the simulated location** -- it stays pinned
-  until an explicit `clear`/`stop` call, exactly matching the original app's DT-based semantics
-  (and exactly what the "if your device is still stuck, turn Location Services off and on" help
-  text already assumes). This is good: it means `PushLocationAsync` doesn't need to keep any
-  process alive between ticks.
+  not a one-off).
 - A mid-command USB disconnect fails fast and cleanly (`"Device is not connected"`, no hang) rather
   than needing a timeout to detect -- good, maps directly to our existing `DeviceNotFoundException`.
 
-**Design conclusion:** start with the simpler "spawn a fresh `set --userspace` subprocess per tick,
-detect success, kill it" approach rather than building a persistent Python helper process that
-reuses one tunnel across a whole route session. At ~2s per call, a 1s `PeriodicTimer` tick
-naturally self-throttles to the real ~2s completion cadence (each tick already `await`s the
-previous push before scheduling the next) -- a ~2s position-update cadence is still smooth enough
-for a walking/biking/driving simulation. A long-lived helper process reusing one tunnel is a
-plausible future optimization if this ever proves too coarse in practice, not something to build
-preemptively.
+**Correction (found later, via real usage rather than protocol testing):** the first pass of this
+rewrite concluded from the above that killing the hung `set` process was safe -- Apple Maps kept
+showing the faked position afterward, which looked like confirmation that the location "stays
+pinned" once set, independent of the process. **That conclusion was wrong**, and the mistake is
+instructive: Maps' blue dot doesn't necessarily re-poll CoreLocation continuously, so it can go on
+showing a stale cached fix indefinitely. Pokemon GO does poll continuously, and reported "Impossible
+de détecter ton emplacement" / "Signal GPS introuvable" seconds after a `set` that had reported
+success -- i.e. the device really had reverted to its real GPS (which had no fix, being indoors).
+
+Reading pymobiledevice3's own source resolved it for certain
+(`cli/developer/dvt/simulate_location.py`): the CLI's `set` command deliberately calls
+`OSUTILS.wait_return()` after applying the location, which on Linux/macOS blocks on
+`signal.sigwait([SIGINT, SIGTERM])` forever -- i.e. the process is *designed* to stay alive
+indefinitely, precisely because it holds open the DTX/Instruments channel that keeps the simulated
+location in effect (`clear`'s `stop_location_simulation` is a separate, explicit call on that same
+kind of channel). This mirrors Xcode's own "Simulate Location" feature exactly: it too only lasts as
+long as the debug session holding that channel is attached. Killing the process the instant we see
+success tears the channel down, and the device reverts to real GPS within moments -- invisible to a
+one-off read, very visible to anything polling continuously (a mobile game's anti-spoofing checks
+being an extreme example of the latter).
+
+**Design conclusion (revised):** `PushLocationAsync`'s DVT `set` path (`LocationSimulationService.cs`)
+must keep the subprocess running after success is detected, not kill it --
+`IPyMobileDeviceRunner.StartPersistentAsync` tracks one live process per device UDID
+(`PyMobileDeviceRunner`'s `persistentProcesses` dictionary), replacing (kill-then-restart) on a new
+`set` for the same device, and killed explicitly by `StopPersistent` on `clear`/stop, or by
+`PyMobileDeviceRunner.Dispose()` on app shutdown (so a killed/crashed app doesn't strand a phone
+mid-fake-location with no process left to `clear` it). The classic iOS<17 `developer
+simulate-location set` path is unaffected: its CLI command exits cleanly on success (no
+`wait_return()` in its source), and the lockdown-based simulation is a persistent server-side toggle
+that doesn't depend on any connection staying open -- confirmed by reading its source, not verified
+live (no pre-17 hardware available; see limitations).
+
+One consequence worth calling out: `RouteSimulationService`'s per-tick `PushLocationAsync` calls
+still replace the persistent process every tick on iOS 17+ (there's no protocol to push a new
+coordinate through an already-open channel) -- each tick briefly closes the old channel and reopens
+a new one, rather than truly holding one continuous channel open for an entire route. This is
+strictly better than the pre-fix behavior (which reverted to real GPS *between* ticks too, just
+less visibly), but a genuinely persistent single channel across a whole route -- e.g. driving the
+device via pymobiledevice3's own `developer dvt simulate-location play <gpx-file>`, which replays a
+whole route through one long-lived channel -- remains a plausible future optimization, not
+implemented here.
+
+**Known remaining limitation, confirmed live: a fixed Set can still slowly drift back to the real
+GPS fix after roughly a couple of minutes,** even with the channel held open per the fix above.
+Root cause not fully pinned down (possibly CoreLocation itself expects some form of periodic
+re-affirmation of a simulated fix, distinct from the DTX channel merely staying open) -- flagged
+here rather than guessed at further without more evidence.
+
+**Keep-alive re-push: tried and reverted.** The natural fix for the drift above is to periodically
+re-send the same coordinate rather than pushing once and leaving the channel idle. Implemented as a
+per-UDID background loop (`PeriodicTimer`, initially a 10s interval) re-invoking the same `set` path
+on a timer, serialized through a per-device `SemaphoreSlim` (`LocationSimulationService.deviceLocks`)
+so it could never overlap a manual Set/Stop or a route-simulation tick. **Confirmed live this made
+things worse, not better:** every refresh has to close the existing channel and open a new one (the
+CLI's `set` has no protocol for pushing an updated coordinate into an already-open session -- see
+above), and during that ~2-4s gap the device has *no* simulated location at all and snaps back to
+real GPS, then flips back once the new channel succeeds. Observed on the device as continuous,
+visible oscillation ("going back and forth") every refresh cycle -- strictly worse UX than the slow
+one-time drift it was meant to fix. **Rolled back** (see git history); `PushLocationAsync` now only
+pushes once per Set call, same as documented above, with the drift limitation stated plainly rather
+than papered over with a worse workaround.
+
+The `SemaphoreSlim`-based per-UDID serialization introduced for that attempt was kept even after the
+revert -- it's independently valuable: overlapping DVT/userspace-tunnel setups for the same device
+were observed to genuinely fight each other (single calls stretching from ~2s to 25-57s) rather than
+politely queue, which is worth preventing regardless of the keep-alive question (e.g. a user
+double-clicking "Set Fake Location", or a manual Set racing a route-simulation tick).
+
+A gap-free fix remains a plausible future direction: encode a fixed point as a single-point (or
+long-duration) GPX route and drive it through pymobiledevice3's own
+`developer dvt simulate-location play <gpx-file>`, which holds one continuous channel open for the
+whole duration rather than restarting per refresh -- not attempted here (would need real
+investigation of `play_gpx_file`'s timing/looping semantics before trusting it live against a
+device), left as-is rather than implemented speculatively.
 
 ## 1. Backend: .NET 10 Minimal API
 

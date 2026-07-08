@@ -113,6 +113,16 @@ chmod +x ./iFakeLocation
   you hit an issue setting a location on an older device specifically, please report it.
 * Loop mode (route simulation) restarts the route from the beginning rather than reversing
   direction back to the start.
+* On iOS 17+, a fixed **Set Fake Location** can slowly drift back to your real position after a
+  couple of minutes of being left untouched. If that happens, click "Set Fake Location" again to
+  refresh it, or use Route Planning instead (it re-applies the position continuously and doesn't
+  have this issue). See [ARCHITECTURE.md](ARCHITECTURE.md) for why, and why a naive
+  "auto-refresh" fix was tried and reverted (it caused worse, visibly flickering behavior).
+* Some apps with dedicated anti-spoofing detection (notably Pokémon GO) may refuse to report a
+  location at all even while this tool is working correctly (confirmed via Apple Maps) -- that's
+  the app's own anti-cheat rejecting a detected spoofing tool, not a bug in this tool, and there
+  isn't a fix for it here (see ARCHITECTURE.md). Using GPS spoofing against a game's anti-cheat
+  also risks action on your account under that game's terms of service.
 
 ## Help
 
