@@ -1,0 +1,4 @@
+# Pinned to the exact versions this build was validated against (see ARCHITECTURE.md) -- bump
+# deliberately, not automatically, and re-verify against a real device before shipping a bump.
+pymobiledevice3==9.33.1
+pyinstaller==6.21.0

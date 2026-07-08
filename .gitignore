@@ -1,4 +1,5 @@
 .vs/
+.claude/
 iFakeLocation/bin/
 iFakeLocation/obj/
 iFakeLocation.Tests/bin/
@@ -12,3 +13,10 @@ frontend/*.tsbuildinfo
 # frontend/scripts/copy-to-wwwroot.mjs), not source -- keep the directory itself via .gitkeep.
 iFakeLocation/wwwroot/*
 !iFakeLocation/wwwroot/.gitkeep
+
+# Frozen pymobiledevice3 executable(s) -- built by pymobiledevice3-build/build.sh|ps1, picked up
+# by iFakeLocation.csproj for the matching RuntimeIdentifier. Not source, not portable across
+# machines/architectures, never committed.
+iFakeLocation/pmd3-dist/
+pymobiledevice3-build/.venv-*/
+pymobiledevice3-build/.build-*/
